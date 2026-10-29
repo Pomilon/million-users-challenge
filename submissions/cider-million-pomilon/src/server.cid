@@ -33,7 +33,8 @@ extern func memmem(haystack: *char, haystacklen: u64, needle: *char, needlelen: 
 extern func time(tloc: *void) -> i64;
 extern func puts(s: *char) -> int;
 extern func printf(fmt: *char) -> int;
-extern func fprintf(stream: *void, fmt: *char) -> int;
+extern func __errno_location() -> *int;
+extern func prctl(option: int, arg2: i64, arg3: i64, arg4: i64, arg5: i64) -> int;
 extern func exit(code: int) -> void;
 extern func malloc(size: i64) -> *void;
 extern func calloc(nmemb: u64, size: u64) -> *void;
@@ -1000,12 +1001,11 @@ func pg_connect(idx: int) -> int {
 
     var val: [*char; 3] = uninit;
     val[0] = g_dburl;
-    val[1] = "3";
+    val[1] = "1";
     val[2] = 0 as *char;
 
     var c: *void = PQconnectdbParams((&kw[0]) as **char, (&val[0]) as **char, 1);
     if (PQstatus(c) != CONNECTION_OK) {
-        fprintf(0 as *void, PQerrorMessage(c));
         PQfinish(c);
         return 0;
     }
@@ -1101,7 +1101,13 @@ func send_resp(fd: int, close_conn: int) -> void {
     var total: i64 = g_alen + (g_zlen as i64);
     var w: i64 = writev(fd, (&iv[0]) as *void, g_zlen > (0 as u64) ? 2 : 1);
     if (w < (0 as i64)) {
-        w = 0 as i64;
+        var e: int = *__errno_location();
+        if (e == 11 || e == 4) {
+            w = 0 as i64;
+        } else {
+            conn_close(fd);
+            return;
+        }
     }
     if (close_conn != 0) {
         c->closing = 1 as u8;
@@ -1110,6 +1116,10 @@ func send_resp(fd: int, close_conn: int) -> void {
         c->out_len = (total - w) as u32;
         c->out_off = 0 as u32;
         c->out_buf = malloc(c->out_len as i64) as *char;
+        if (c->out_buf as i64 == 0 as i64) {
+            conn_close(fd);
+            return;
+        }
         if (w < g_alen) {
             memcpy(c->out_buf as *void, (g_arena as i64 + w) as *void, g_alen - w);
             if (g_zlen > (0 as u64)) {
@@ -1133,10 +1143,17 @@ func respond(q: *QueryItem, res: *void, fail: int) -> void {
         return;
     }
     var close_conn: int = q->close_conn as int;
+    if (fail != 0 && c->in_len > (0 as u32)) { close_conn = 1; }
     g_want_gz = q->want_gz as int;
 
     if (fail != 0) {
-        err_resp(500, "internal server error", close_conn);
+        if (q->kind == Q_HEALTH) {
+            begin_resp(503, close_conn);
+            puts_lit("{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\"connection lost\"}");
+            finish_resp();
+        } else {
+            err_resp(500, "internal server error", close_conn);
+        }
     } else if (q->kind == Q_FEED) {
         if (res as i64 == 0 as i64 || PQresultStatus(res) != PGRES_TUPLES_OK || PQnfields(res) != 5) {
             err_resp(500, "internal server error", close_conn);
@@ -1228,7 +1245,7 @@ func respond(q: *QueryItem, res: *void, fail: int) -> void {
     }
     c->busy = 0 as u8;
     send_resp(fd, close_conn);
-    if (c->open != (0 as u8) && c->out_buf as i64 == 0 as i64 && c->closing == (0 as u8) && c->in_len > (0 as u32)) {
+    if (fail == 0 && c->open != (0 as u8) && c->out_buf as i64 == 0 as i64 && c->closing == (0 as u8) && c->in_len > (0 as u32)) {
         process_client(g_ep, fd, c->in_buf, c->in_len as i64);
     }
 }
@@ -1784,7 +1801,7 @@ func on_readable(fd: int) -> void {
     var r: i64 = 0 as i64;
     if (c->in_len > (0 as u32) || c->busy != (0 as u8)) {
         if ((c->incap - c->in_len) < (4096 as u32)) {
-            if (c->incap > (4 * MAX_REQ as u32)) {
+            if (c->incap > (MAX_REQ as u32)) {
                 conn_close(fd);
                 return;
             }
@@ -1799,7 +1816,12 @@ func on_readable(fd: int) -> void {
         }
         r = read(fd, (c->in_buf as i64 + c->in_len as i64) as *void, (c->incap - c->in_len) as i64);
         if (r <= (0 as i64)) {
-            if (r < (0 as i64)) { return; }
+            if (r < (0 as i64)) {
+                var e: int = *__errno_location();
+                if (e == 11 || e == 4) { return; }
+                conn_close(fd);
+                return;
+            }
             conn_close(fd);
             return;
         }
@@ -1810,7 +1832,12 @@ func on_readable(fd: int) -> void {
     } else {
         r = read(fd, g_rbuf as *void, RBUF_SIZE);
         if (r <= (0 as i64)) {
-            if (r < (0 as i64)) { return; }
+            if (r < (0 as i64)) {
+                var e: int = *__errno_location();
+                if (e == 11 || e == 4) { return; }
+                conn_close(fd);
+                return;
+            }
             conn_close(fd);
             return;
         }
@@ -1822,7 +1849,12 @@ func on_writable(fd: int) -> void {
     var c: *Connection = (g_conns as i64 + (fd as i64) * (sizeof(Connection) as i64)) as *Connection;
     if (c->out_buf as i64 == 0 as i64) { return; }
     var w: i64 = write(fd, (c->out_buf as i64 + c->out_off as i64) as *void, (c->out_len - c->out_off) as i64);
-    if (w < (0 as i64)) { return; }
+    if (w < (0 as i64)) {
+        var e: int = *__errno_location();
+        if (e == 11 || e == 4) { return; }
+        conn_close(fd);
+        return;
+    }
     c->out_off = c->out_off + (w as u32);
     if (c->out_off < c->out_len) { return; }
     free(c->out_buf as *void);
@@ -1953,12 +1985,6 @@ func run_worker(worker_idx: int, core_id: int) -> void {
             }
         }
 
-        if (n > 0 && n < BATCH_MIN) {
-            var ts: TimeSpec = uninit;
-            ts.tv_sec = 0 as i64;
-            ts.tv_nsec = 2000000 as i64;
-            nanosleep((&ts) as *void, 0 as *void);
-        }
     }
 }
 
@@ -2023,23 +2049,41 @@ func _start() -> void {
         }
     }
 
+    if (num_cpus > 128) { num_cpus = 128; }
     g_npg = 64 / num_cpus;
     if (g_npg < 2) { g_npg = 2; }
 
     printf("== [Cider] Million Users Server starting with workers...\n");
 
+    var worker_pids: [int; 128] = uninit;
     for (var wi: int = 0; wi < num_cpus; wi = wi + 1) {
         var pid: int = fork();
         if (pid == 0) {
+            prctl(1, 9 as i64, 0 as i64, 0 as i64, 0 as i64);
             run_worker(wi, cpu_ids[wi]);
             exit(0);
         }
+        worker_pids[wi] = pid;
     }
 
     for (;;) {
         var status: int = 0;
         var p: int = waitpid(-1, &status, 0);
         if (p < 0) { break; }
+        var wi: int = 0;
+        while (wi < num_cpus) {
+            if (worker_pids[wi] == p) { break; }
+            wi = wi + 1;
+        }
+        if (wi < num_cpus) {
+            var np: int = fork();
+            if (np == 0) {
+                prctl(1, 9 as i64, 0 as i64, 0 as i64, 0 as i64);
+                run_worker(wi, cpu_ids[wi]);
+                exit(0);
+            }
+            if (np > 0) { worker_pids[wi] = np; }
+        }
     }
     exit(0);
 }

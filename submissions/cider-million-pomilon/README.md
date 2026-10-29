@@ -14,7 +14,7 @@ Feed API submission implemented in **Cider** ([github.com/Pomilon/Cider](https:/
 - **Workers:** Spawns one worker process per CPU core (matching `sched_getaffinity` / `nproc`).
 - **Listeners:** Every worker binds its own listener with `SO_REUSEPORT` on both `PORT` and `EXTRA_PORT`. The Linux kernel distributes connections across workers via BPF hashing.
 - **Postgres Pipeline:** Each worker maintains persistent non-blocking PostgreSQL connections in `libpq` pipeline mode (`PQenterPipelineMode`). Queries are dispatched with binary parameters (`PQsendQueryPrepared`), and results are streamed back asynchronously through the worker's event loop.
-- **Zero-Allocation HTTP:** Requests are parsed in-place, and response headers and bodies are formatted into recycled per-worker buffer pools without runtime heap allocations.
+- **Recycled HTTP Buffers:** Requests are parsed in-place, and response headers and bodies use recycled per-worker buffer pools; slow/partial write paths may still allocate.
 - **Strict Validation:** RFC-compliant JSON parsing, full Unicode/control character escaping, and constant-time HMAC-SHA256 JWT signature and expiration verification.
 
 ## Build and Run
@@ -30,5 +30,5 @@ bash build.sh
 bash test/run.sh submissions/cider-million-pomilon
 
 # 4. Start server in foreground
-DATABASE_URL=postgres://pomilon:postgres@127.0.0.1:5432/feed_test JWT_SECRET=million-users-challenge HOST=0.0.0.0 PORT=80 EXTRA_PORT=81 bash start.sh
+DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/feed_test JWT_SECRET=million-users-challenge HOST=0.0.0.0 PORT=80 EXTRA_PORT=81 bash start.sh
 ```

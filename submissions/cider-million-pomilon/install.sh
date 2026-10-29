@@ -13,12 +13,19 @@ apt-get install -y -qq --no-install-recommends \
   ca-certificates \
   libssl-dev \
   libpq-dev \
-  libdeflate-dev
+  libdeflate-dev \
+  python3
 
 CIDER_DIR=/opt/cider
 CIDER_COMMIT=ac1649051989b520594e989d14ecdc4472fbbcee
 
-if [ ! -x "$CIDER_DIR/build/cider" ]; then
+cider_ok=0
+if [ -x "$CIDER_DIR/build/cider" ] && [ -d "$CIDER_DIR/.git" ]; then
+  if [ "$(git -C "$CIDER_DIR" rev-parse HEAD 2>/dev/null || true)" = "$CIDER_COMMIT" ]; then
+    cider_ok=1
+  fi
+fi
+if [ "$cider_ok" = 0 ]; then
   echo "== [Cider] Fetching and building Cider compiler from source..."
   rm -rf "$CIDER_DIR"
   git clone https://github.com/Pomilon/Cider.git "$CIDER_DIR"
